@@ -1085,6 +1085,131 @@
                 gap: 15px;
             }
         }
+
+
+        /* WORKSPACE HISTORY VIEWS */
+        .workspace-history-view {
+            display: none;
+        }
+
+        .history-summary {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px;
+            margin-bottom: 20px;
+        }
+
+        .history-stat {
+            background: #fff;
+            border: 1px solid var(--border);
+            border-radius: 13px;
+            padding: 17px 18px;
+        }
+
+        .history-stat-label {
+            font-size: 10px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            font-weight: 750;
+        }
+
+        .history-stat-value {
+            margin-top: 6px;
+            font-size: 23px;
+            font-weight: 800;
+            color: var(--text);
+        }
+
+        .history-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .history-btn {
+            height: 33px;
+            padding: 0 11px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: #fff;
+            color: #4a5568;
+            cursor: pointer;
+            font-size: 10px;
+            font-weight: 750;
+        }
+
+        .history-btn:hover {
+            border-color: #aaa5ff;
+            color: var(--primary);
+        }
+
+        .history-btn.primary {
+            border-color: #ddd9ff;
+            background: var(--soft-primary);
+            color: #5149df;
+        }
+
+        .history-status {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 7px;
+            border-radius: 6px;
+            font-size: 9px;
+            font-weight: 750;
+            text-transform: capitalize;
+            background: #f3f4f6;
+            color: #596273;
+        }
+
+        .history-status.completed {
+            background: #ecfdf3;
+            color: #168345;
+        }
+
+        .history-status.running,
+        .history-status.queued {
+            background: #fff7ed;
+            color: #c2410c;
+        }
+
+        .history-status.failed {
+            background: #fef2f2;
+            color: #b91c1c;
+        }
+
+        .history-empty {
+            padding: 55px 20px;
+            text-align: center;
+            color: #9aa2b1;
+            font-size: 12px;
+        }
+
+        .history-search-title {
+            font-weight: 750;
+            color: #252d3d;
+        }
+
+        .history-search-meta {
+            margin-top: 3px;
+            font-size: 9px;
+            color: var(--muted);
+        }
+
+        .target-note {
+            margin-top: 10px;
+            color: #8a92a0;
+            font-size: 10px;
+            line-height: 1.5;
+        }
+
+        @media(max-width:850px) {
+            .history-summary {
+                grid-template-columns: 1fr;
+            }
+        }
+
     </style>
 </head>
 
@@ -1125,17 +1250,17 @@
 
             <div class="nav">
 
-                <div class="nav-item active">
+                <div class="nav-item active" id="navLeadGenerator" onclick="showWorkspaceView('generator')">
                     <div class="nav-icon">⌁</div>
                     Lead Generator
                 </div>
 
-                <div class="nav-item">
+                <div class="nav-item" id="navMySearches" onclick="showWorkspaceView('searches')">
                     <div class="nav-icon">◷</div>
                     My Searches
                 </div>
 
-                <div class="nav-item">
+                <div class="nav-item" id="navDownloads" onclick="showWorkspaceView('downloads')">
                     <div class="nav-icon">↓</div>
                     Downloads
                 </div>
@@ -1206,11 +1331,11 @@
 
                     <div>
 
-                        <div class="page-title">
+                        <div class="page-title" id="pageTitle">
                             Lead Generator
                         </div>
 
-                        <div class="page-subtitle">
+                        <div class="page-subtitle" id="pageSubtitle">
                             Find targeted business leads from multiple sources
                         </div>
 
@@ -1237,7 +1362,7 @@
             </header>
 
 
-            <div class="content">
+            <div class="content" id="mainContent">
 
 
                 <!-- SOURCES -->
@@ -1678,6 +1803,10 @@
 
                                 </div>
 
+                                <div class="target-note">
+                                    LeadForge will keep collecting unique leads toward your selected target. If the selected location does not contain enough matching businesses, the final count can be lower than the requested quantity.
+                                </div>
+
                             </div>
 
 
@@ -2062,6 +2191,102 @@
 
                 </section>
 
+                <!-- MY SEARCHES -->
+                <section class="workspace-history-view" id="searchesView">
+
+                    <div class="history-summary">
+                        <div class="history-stat">
+                            <div class="history-stat-label">Total Searches</div>
+                            <div class="history-stat-value" id="historyTotalSearches">0</div>
+                        </div>
+                        <div class="history-stat">
+                            <div class="history-stat-label">Completed Searches</div>
+                            <div class="history-stat-value" id="historyCompletedSearches">0</div>
+                        </div>
+                        <div class="history-stat">
+                            <div class="history-stat-label">Leads Collected</div>
+                            <div class="history-stat-value" id="historyTotalLeads">0</div>
+                        </div>
+                    </div>
+
+                    <section class="section-card">
+                        <div class="card-header">
+                            <div>
+                                <div class="card-title">My Searches</div>
+                                <div class="card-description">Every lead generation job saved in n8n</div>
+                            </div>
+                            <button class="download-btn" type="button" onclick="loadHistory(true)">↻ Refresh</button>
+                        </div>
+
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Search</th>
+                                        <th>Location</th>
+                                        <th>Requested</th>
+                                        <th>Found</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="searchHistoryBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="history-empty" id="searchHistoryEmpty">No saved searches yet.</div>
+                    </section>
+
+                </section>
+
+
+                <!-- DOWNLOADS -->
+                <section class="workspace-history-view" id="downloadsView">
+
+                    <div class="history-summary">
+                        <div class="history-stat">
+                            <div class="history-stat-label">Downloaded Searches</div>
+                            <div class="history-stat-value" id="downloadedSearchesCount">0</div>
+                        </div>
+                        <div class="history-stat">
+                            <div class="history-stat-label">Total Downloads</div>
+                            <div class="history-stat-value" id="totalDownloadCount">0</div>
+                        </div>
+                        <div class="history-stat">
+                            <div class="history-stat-label">Downloadable Leads</div>
+                            <div class="history-stat-value" id="downloadableLeadCount">0</div>
+                        </div>
+                    </div>
+
+                    <section class="section-card">
+                        <div class="card-header">
+                            <div>
+                                <div class="card-title">Downloads</div>
+                                <div class="card-description">Download previous search results again at any time</div>
+                            </div>
+                            <button class="download-btn" type="button" onclick="loadHistory(true)">↻ Refresh</button>
+                        </div>
+
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Search Date</th>
+                                        <th>Search</th>
+                                        <th>Leads</th>
+                                        <th>Downloads</th>
+                                        <th>Last Download</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="downloadHistoryBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="history-empty" id="downloadHistoryEmpty">No downloaded searches yet.</div>
+                    </section>
+
+                </section>
+
 
             </div>
         </main>
@@ -2102,6 +2327,12 @@
         const N8N_RESULTS_WEBHOOK =
             "https://gen-forge.app.n8n.cloud/webhook/lead-generator-results";
 
+        const N8N_HISTORY_WEBHOOK =
+            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-history";
+
+        const N8N_DOWNLOAD_WEBHOOK =
+            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-download";
+
 
         /*
         ==============================================================
@@ -2120,6 +2351,10 @@
         let lastResultCount = 0;
 
         let isDemoMode = false;
+
+        let historyJobs = [];
+
+        let activeWorkspaceView = "generator";
 
 
 
@@ -4105,6 +4340,10 @@
                         "Lead generation completed."
                     );
 
+                    setTimeout(function () {
+                        loadHistory(false);
+                    }, 800);
+
                 }
 
 
@@ -4746,9 +4985,31 @@
 
             }
 
+            buildAndDownloadCSV(
+                currentResults,
+                currentJobId,
+                getHistoryJobLabel(
+                    historyJobs.find(function (job) {
+                        return job.job_id === currentJobId;
+                    }) || {}
+                )
+            );
+
+        }
+
+
+        function buildAndDownloadCSV(
+            leads,
+            jobId,
+            label
+        ) {
+
+            if (!Array.isArray(leads) || !leads.length) {
+                showToast("No leads available to download.");
+                return;
+            }
 
             const headers = [
-
                 "Business Name",
                 "Email",
                 "Phone",
@@ -4758,113 +5019,135 @@
                 "State",
                 "Country",
                 "Status"
-
             ];
 
+            const rows = leads.map(function (lead) {
+                return [
+                    lead.business_name || "",
+                    lead.email || "",
+                    lead.phone || "",
+                    lead.website || "",
+                    lead.address || "",
+                    lead.city || "",
+                    lead.state || "",
+                    lead.country || "",
+                    lead.status || ""
+                ];
+            });
 
-            const rows =
-                currentResults.map(
-                    function (lead) {
-
-                        return [
-
-                            lead.business_name || "",
-                            lead.email || "",
-                            lead.phone || "",
-                            lead.website || "",
-                            lead.address || "",
-                            lead.city || "",
-                            lead.state || "",
-                            lead.country || "",
-                            lead.status || ""
-
-                        ];
-
-                    }
-                );
-
-
-            const csv = [
-
-                headers,
-                ...rows
-
-            ]
-
-                .map(
-                    function (row) {
-
-                        return row
-                            .map(
-                                function (value) {
-
-                                    return '"' +
-                                        String(value)
-                                            .replace(
-                                                /"/g,
-                                                '""'
-                                            ) +
-                                        '"';
-
-                                }
-                            )
-                            .join(",");
-
-                    }
-                )
+            const csv = [headers, ...rows]
+                .map(function (row) {
+                    return row.map(function (value) {
+                        return '"' + String(value).replace(/"/g, '""') + '"';
+                    }).join(",");
+                })
                 .join("\n");
 
+            const blob = new Blob(
+                [csv],
+                { type: "text/csv;charset=utf-8;" }
+            );
 
-            const blob =
-                new Blob(
-                    [csv],
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+
+            const safeLabel = String(label || "leads")
+                .replace(/[^a-z0-9]+/gi, "-")
+                .replace(/^-+|-+$/g, "")
+                .slice(0, 55) || "leads";
+
+            link.href = url;
+            link.download =
+                "leadforge-" +
+                safeLabel.toLowerCase() +
+                "-" +
+                new Date().toISOString().slice(0, 10) +
+                ".csv";
+
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+
+            if (jobId) {
+                trackDownload(jobId);
+            }
+
+        }
+
+
+        async function trackDownload(jobId) {
+
+            try {
+
+                const response = await fetch(
+                    N8N_DOWNLOAD_WEBHOOK,
                     {
-                        type:
-                            "text/csv;charset=utf-8;"
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": getLeadForgeAuthHeader()
+                        },
+                        body: JSON.stringify({
+                            job_id: jobId,
+                            downloaded_at: new Date().toISOString()
+                        })
                     }
                 );
 
+                if (!response.ok) {
+                    throw new Error("Download tracking failed");
+                }
 
-            const url =
-                URL.createObjectURL(
-                    blob
+                setTimeout(function () {
+                    loadHistory(false);
+                }, 300);
+
+            }
+            catch (error) {
+                console.log("Download tracking error:", error);
+            }
+
+        }
+
+
+        async function downloadSavedJob(jobId) {
+
+            try {
+
+                const response = await fetch(
+                    N8N_RESULTS_WEBHOOK +
+                    "?job_id=" +
+                    encodeURIComponent(jobId),
+                    {
+                        headers: {
+                            "Authorization": getLeadForgeAuthHeader()
+                        }
+                    }
                 );
 
+                if (!response.ok) {
+                    throw new Error("Unable to load saved leads");
+                }
 
-            const link =
-                document.createElement(
-                    "a"
+                const data = await response.json();
+                const leads = Array.isArray(data.leads) ? data.leads : [];
+
+                const job = historyJobs.find(function (item) {
+                    return item.job_id === jobId;
+                }) || {};
+
+                buildAndDownloadCSV(
+                    leads,
+                    jobId,
+                    getHistoryJobLabel(job)
                 );
 
-
-            link.href =
-                url;
-
-
-            link.download =
-                "leads-" +
-                new Date()
-                    .toISOString()
-                    .slice(0, 10) +
-                ".csv";
-
-
-            document.body.appendChild(
-                link
-            );
-
-
-            link.click();
-
-
-            document.body.removeChild(
-                link
-            );
-
-
-            URL.revokeObjectURL(
-                url
-            );
+            }
+            catch (error) {
+                console.error(error);
+                showToast("Unable to download this saved search.");
+            }
 
         }
 
@@ -5156,6 +5439,372 @@
 
         /*
         ==============================================================
+                    WORKSPACE / SEARCH HISTORY
+        ==============================================================
+        */
+
+        function showWorkspaceView(view) {
+
+            activeWorkspaceView = view;
+
+            const content = document.getElementById("mainContent");
+            const historyViews = content.querySelectorAll(
+                ".workspace-history-view"
+            );
+
+            Array.from(content.children).forEach(function (child) {
+                if (child.classList.contains("workspace-history-view")) {
+                    child.style.display = "none";
+                }
+                else {
+                    child.style.display = view === "generator" ? "" : "none";
+                }
+            });
+
+            if (view === "searches") {
+                document.getElementById("searchesView").style.display = "block";
+            }
+
+            if (view === "downloads") {
+                document.getElementById("downloadsView").style.display = "block";
+            }
+
+            document.getElementById("navLeadGenerator").classList.toggle(
+                "active",
+                view === "generator"
+            );
+            document.getElementById("navMySearches").classList.toggle(
+                "active",
+                view === "searches"
+            );
+            document.getElementById("navDownloads").classList.toggle(
+                "active",
+                view === "downloads"
+            );
+
+            const titles = {
+                generator: [
+                    "Lead Generator",
+                    "Find targeted business leads from multiple sources"
+                ],
+                searches: [
+                    "My Searches",
+                    "Review previous lead generation jobs and open their results"
+                ],
+                downloads: [
+                    "Downloads",
+                    "Download previous lead lists again"
+                ]
+            };
+
+            document.getElementById("pageTitle").textContent =
+                titles[view][0];
+
+            document.getElementById("pageSubtitle").textContent =
+                titles[view][1];
+
+            document.getElementById("sidebar").classList.remove("open");
+
+            if (view !== "generator") {
+                loadHistory(false);
+            }
+
+        }
+
+
+        async function loadHistory(showMessage) {
+
+            try {
+
+                const response = await fetch(
+                    N8N_HISTORY_WEBHOOK,
+                    {
+                        headers: {
+                            "Authorization": getLeadForgeAuthHeader(),
+                            "Accept": "application/json"
+                        },
+                        cache: "no-store"
+                    }
+                );
+
+                if (!response.ok) {
+                    throw new Error("History webhook failed");
+                }
+
+                const data = await response.json();
+
+                historyJobs = Array.isArray(data)
+                    ? data
+                    : (
+                        Array.isArray(data.jobs)
+                            ? data.jobs
+                            : []
+                    );
+
+                historyJobs.sort(function (a, b) {
+                    const aTime = new Date(
+                        a.job_created_at || a.job_updated_at || 0
+                    ).getTime();
+                    const bTime = new Date(
+                        b.job_created_at || b.job_updated_at || 0
+                    ).getTime();
+                    return bTime - aTime;
+                });
+
+                renderSearchHistory();
+                renderDownloadHistory();
+
+                if (showMessage) {
+                    showToast("History refreshed.");
+                }
+
+            }
+            catch (error) {
+                console.log("History loading error:", error);
+
+                if (showMessage || activeWorkspaceView !== "generator") {
+                    showToast("Unable to load saved search history.");
+                }
+            }
+
+        }
+
+
+        function renderSearchHistory() {
+
+            const tbody = document.getElementById("searchHistoryBody");
+            const empty = document.getElementById("searchHistoryEmpty");
+
+            tbody.innerHTML = "";
+
+            const completed = historyJobs.filter(function (job) {
+                return String(job.status || "").toLowerCase() === "completed";
+            });
+
+            const totalLeads = completed.reduce(function (sum, job) {
+                return sum + Number(job.total_valid || job.total_found || 0);
+            }, 0);
+
+            document.getElementById("historyTotalSearches").textContent =
+                historyJobs.length.toLocaleString();
+
+            document.getElementById("historyCompletedSearches").textContent =
+                completed.length.toLocaleString();
+
+            document.getElementById("historyTotalLeads").textContent =
+                totalLeads.toLocaleString();
+
+            empty.style.display = historyJobs.length ? "none" : "block";
+
+            historyJobs.forEach(function (job) {
+
+                const row = document.createElement("tr");
+                const status = String(job.status || "unknown").toLowerCase();
+                const found = Number(job.total_valid || job.total_found || 0);
+                const requested = Number(job.total_requested || job.quantity || 0);
+
+                row.innerHTML = `
+                    <td>${escapeHTML(formatHistoryDate(job.job_created_at || job.job_updated_at))}</td>
+                    <td>
+                        <div class="history-search-title">${escapeHTML(getHistoryJobLabel(job))}</div>
+                        <div class="history-search-meta">${escapeHTML(job.job_id || "")}</div>
+                    </td>
+                    <td>${escapeHTML(getHistoryJobLocation(job))}</td>
+                    <td>${requested.toLocaleString()}</td>
+                    <td>${found.toLocaleString()}</td>
+                    <td><span class="history-status ${escapeAttribute(status)}">${escapeHTML(status)}</span></td>
+                    <td>
+                        <div class="history-actions">
+                            <button class="history-btn primary" type="button" onclick="openSavedSearch('${escapeJSString(job.job_id || "")}')">View Leads</button>
+                            <button class="history-btn" type="button" onclick="downloadSavedJob('${escapeJSString(job.job_id || "")}')" ${found ? "" : "disabled"}>↓ CSV</button>
+                        </div>
+                    </td>
+                `;
+
+                tbody.appendChild(row);
+
+            });
+
+        }
+
+
+        function renderDownloadHistory() {
+
+            const tbody = document.getElementById("downloadHistoryBody");
+            const empty = document.getElementById("downloadHistoryEmpty");
+
+            const downloads = historyJobs.filter(function (job) {
+                return Number(job.download_count || 0) > 0 || Boolean(job.downloaded_at);
+            });
+
+            tbody.innerHTML = "";
+            empty.style.display = downloads.length ? "none" : "block";
+
+            const totalDownloads = downloads.reduce(function (sum, job) {
+                return sum + Math.max(1, Number(job.download_count || 0));
+            }, 0);
+
+            const downloadableLeads = downloads.reduce(function (sum, job) {
+                return sum + Number(job.total_valid || job.total_found || 0);
+            }, 0);
+
+            document.getElementById("downloadedSearchesCount").textContent =
+                downloads.length.toLocaleString();
+
+            document.getElementById("totalDownloadCount").textContent =
+                totalDownloads.toLocaleString();
+
+            document.getElementById("downloadableLeadCount").textContent =
+                downloadableLeads.toLocaleString();
+
+            downloads.forEach(function (job) {
+
+                const row = document.createElement("tr");
+                const found = Number(job.total_valid || job.total_found || 0);
+
+                row.innerHTML = `
+                    <td>${escapeHTML(formatHistoryDate(job.job_created_at || job.job_updated_at))}</td>
+                    <td>
+                        <div class="history-search-title">${escapeHTML(getHistoryJobLabel(job))}</div>
+                        <div class="history-search-meta">${escapeHTML(getHistoryJobLocation(job))}</div>
+                    </td>
+                    <td>${found.toLocaleString()}</td>
+                    <td>${Math.max(1, Number(job.download_count || 0)).toLocaleString()}</td>
+                    <td>${escapeHTML(formatHistoryDate(job.downloaded_at))}</td>
+                    <td>
+                        <button class="history-btn primary" type="button" onclick="downloadSavedJob('${escapeJSString(job.job_id || "")}')">↓ Download Again</button>
+                    </td>
+                `;
+
+                tbody.appendChild(row);
+
+            });
+
+        }
+
+
+        async function openSavedSearch(jobId) {
+
+            if (!jobId) {
+                return;
+            }
+
+            showWorkspaceView("generator");
+
+            stopPolling();
+            currentJobId = jobId;
+            currentResults = [];
+            lastResultCount = 0;
+
+            document.getElementById("resultsBody").innerHTML = "";
+            document.getElementById("resultCount").textContent = "0";
+            document.getElementById("emptyResults").style.display = "block";
+            document.getElementById("resultsCard").classList.add("show");
+            document.getElementById("progressCard").classList.remove("show");
+
+            try {
+
+                const response = await fetch(
+                    N8N_RESULTS_WEBHOOK +
+                    "?job_id=" +
+                    encodeURIComponent(jobId),
+                    {
+                        headers: {
+                            "Authorization": getLeadForgeAuthHeader()
+                        }
+                    }
+                );
+
+                if (!response.ok) {
+                    throw new Error("Saved search results failed");
+                }
+
+                const data = await response.json();
+                const leads = Array.isArray(data.leads) ? data.leads : [];
+
+                addNewLeads(leads);
+
+                const job = historyJobs.find(function (item) {
+                    return item.job_id === jobId;
+                });
+
+                showToast(
+                    leads.length.toLocaleString() +
+                    " leads loaded" +
+                    (job ? " from " + formatHistoryDate(job.job_created_at) : "") +
+                    "."
+                );
+
+                document.getElementById("resultsCard").scrollIntoView({
+                    behavior: "smooth",
+                    block: "start"
+                });
+
+            }
+            catch (error) {
+                console.error(error);
+                showToast("Unable to load saved leads.");
+            }
+
+        }
+
+
+        function getHistoryJobLabel(job) {
+            return String(
+                job.keyword ||
+                job.niche ||
+                "Lead Search"
+            ).trim();
+        }
+
+
+        function getHistoryJobLocation(job) {
+            const parts = [
+                job.city,
+                job.state,
+                job.country
+            ].filter(Boolean);
+
+            return parts.length
+                ? parts.join(", ")
+                : "All locations";
+        }
+
+
+        function formatHistoryDate(value) {
+
+            if (!value) {
+                return "-";
+            }
+
+            const date = new Date(value);
+
+            if (Number.isNaN(date.getTime())) {
+                return String(value);
+            }
+
+            return date.toLocaleString([], {
+                year: "numeric",
+                month: "short",
+                day: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit"
+            });
+
+        }
+
+
+        function escapeJSString(value) {
+            return String(value)
+                .replace(/\\/g, "\\\\")
+                .replace(/'/g, "\\'")
+                .replace(/\r/g, "\\r")
+                .replace(/\n/g, "\\n");
+        }
+
+
+        /*
+        ==============================================================
                             SIDEBAR
         ==============================================================
         */
@@ -5234,6 +5883,8 @@
         initLocationSelectors();
 
         updateCredits();
+
+        loadHistory(false);
 
     </script>
 
