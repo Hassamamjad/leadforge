@@ -4436,16 +4436,18 @@
             let delay;
 
             if (q <= 500) {
-                delay = 180000;
-            }
-            else if (q <= 1000) {
+                // Current Gosom workflow commonly finishes around 3 minutes.
+                // Check a little later so most jobs need only ONE n8n check execution.
                 delay = 210000;
             }
-            else if (q <= 2500) {
+            else if (q <= 1000) {
                 delay = 270000;
             }
-            else {
+            else if (q <= 2500) {
                 delay = 360000;
+            }
+            else {
+                delay = 480000;
             }
 
 
@@ -4462,11 +4464,11 @@
         function getNextCheckDelay() {
 
             const delays = [
-                90000,
-                120000,
                 180000,
                 240000,
-                300000
+                300000,
+                360000,
+                420000
             ];
 
 
@@ -4525,6 +4527,35 @@
                 );
 
         }
+
+
+        // If the user switches to n8n/Railway while the scrape is running,
+        // no backend checks are spent in the hidden tab. As soon as the
+        // LeadForge tab becomes visible again, perform exactly one immediate
+        // check instead of waiting for the old timer.
+        document.addEventListener(
+            "visibilitychange",
+            function () {
+
+                if (
+                    !document.hidden &&
+                    currentJobId &&
+                    !isDemoMode
+                ) {
+
+                    if (checkTimer) {
+                        clearTimeout(checkTimer);
+                        checkTimer = null;
+                    }
+
+                    fetchJobCheck(
+                        currentRequestedQuantity ||
+                        Number(currentJobMeta?.total_requested || 0) ||
+                        100
+                    );
+                }
+            }
+        );
 
 
         function stopPolling() {
