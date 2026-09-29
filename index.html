@@ -2092,7 +2092,7 @@
                         <div class="progress-details">
 
                             <span id="progressDetail">
-                                Waiting for n8n...
+                                Preparing scraper...
                             </span>
 
                             <span id="progressLeads">
@@ -2119,7 +2119,7 @@
                                 </div>
 
                                 <div class="card-description">
-                                    Leads appear here as they are discovered
+                                    Final leads load automatically when the scraping job completes
                                 </div>
 
                             </div>
@@ -2213,7 +2213,7 @@
                         <div class="card-header">
                             <div>
                                 <div class="card-title">My Searches</div>
-                                <div class="card-description">Every lead generation job saved in n8n</div>
+                                <div class="card-description">Searches are saved locally in this browser — no n8n execution used</div>
                             </div>
                             <button class="download-btn" type="button" onclick="loadHistory(true)">↻ Refresh</button>
                         </div>
@@ -2262,7 +2262,7 @@
                         <div class="card-header">
                             <div>
                                 <div class="card-title">Downloads</div>
-                                <div class="card-description">Download previous search results again at any time</div>
+                                <div class="card-description">CSV files and download dates are stored locally in this browser</div>
                             </div>
                             <button class="download-btn" type="button" onclick="loadHistory(true)">↻ Refresh</button>
                         </div>
@@ -2301,37 +2301,28 @@
 
         /*
         ==============================================================
-                            N8N CONFIGURATION
+                    N8N CONFIGURATION — LOW EXECUTION MODE
         ==============================================================
-        
-        YAHAN APNE 3 WEBHOOK URLs PASTE KARO.
-        
-        1. START WEBHOOK
-           Form n8n ko send karega.
-        
-        2. STATUS WEBHOOK
-           UI har 5 seconds baad progress check karegi.
-        
-        3. RESULTS WEBHOOK
-           UI har 5 seconds baad new leads check karegi.
-        
+
+        Only TWO LeadForge runtime webhooks are used by this page:
+
+        1. START
+           Starts one background scraping execution.
+
+        2. JOB CHECK
+           Low-frequency check for real status. When the job is complete
+           the SAME response also contains the final leads.
+
+        Search history and CSV download tracking are stored in IndexedDB
+        in this browser, so they do not create n8n executions.
         ==============================================================
         */
 
         const N8N_START_WEBHOOK =
             "https://gen-forge.app.n8n.cloud/webhook/lead-generator";
 
-        const N8N_STATUS_WEBHOOK =
-            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-status";
-
-        const N8N_RESULTS_WEBHOOK =
-            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-results";
-
-        const N8N_HISTORY_WEBHOOK =
-            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-history";
-
-        const N8N_DOWNLOAD_WEBHOOK =
-            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-download";
+        const N8N_CHECK_WEBHOOK =
+            "https://gen-forge.app.n8n.cloud/webhook/lead-generator-check";
 
 
         /*
@@ -2341,20 +2332,243 @@
         */
 
         let currentJobId = null;
+        let currentJobMeta = null;
+        let currentRequestedQuantity = 0;
 
-        let statusInterval = null;
+        let checkTimer = null;
+        let checkAttempt = 0;
 
-        let resultsInterval = null;
+        let localProgressTimer = null;
+        let localProgressValue = 0;
 
         let currentResults = [];
-
-        let lastResultCount = 0;
-
         let isDemoMode = false;
 
         let historyJobs = [];
-
         let activeWorkspaceView = "generator";
+
+
+        /*
+        ==============================================================
+                        LOCAL HISTORY DATABASE
+        ==============================================================
+
+        Completed searches, lead arrays and downloaded CSV content are
+        stored locally in IndexedDB. This intentionally replaces the
+        n8n History and Download Tracking webhooks.
+        ==============================================================
+        */
+
+        const LF_DB_NAME = "leadforge-local-history";
+        const LF_DB_VERSION = 1;
+        const LF_JOB_STORE = "jobs";
+
+        let leadForgeDBPromise = null;
+
+
+        function openLeadForgeDB() {
+
+            if (leadForgeDBPromise) {
+                return leadForgeDBPromise;
+            }
+
+            leadForgeDBPromise =
+                new Promise(function (resolve, reject) {
+
+                    if (!window.indexedDB) {
+                        reject(new Error("IndexedDB is not available."));
+                        return;
+                    }
+
+                    const request =
+                        indexedDB.open(
+                            LF_DB_NAME,
+                            LF_DB_VERSION
+                        );
+
+                    request.onupgradeneeded =
+                        function () {
+
+                            const db =
+                                request.result;
+
+                            if (
+                                !db.objectStoreNames.contains(
+                                    LF_JOB_STORE
+                                )
+                            ) {
+                                db.createObjectStore(
+                                    LF_JOB_STORE,
+                                    {
+                                        keyPath: "job_id"
+                                    }
+                                );
+                            }
+
+                        };
+
+
+                    request.onsuccess =
+                        function () {
+                            resolve(request.result);
+                        };
+
+
+                    request.onerror =
+                        function () {
+                            reject(
+                                request.error ||
+                                new Error("Unable to open local history.")
+                            );
+                        };
+
+                });
+
+            return leadForgeDBPromise;
+
+        }
+
+
+        async function saveLocalJob(job) {
+
+            if (!job || !job.job_id) {
+                return null;
+            }
+
+            const db =
+                await openLeadForgeDB();
+
+            return new Promise(function (resolve, reject) {
+
+                const transaction =
+                    db.transaction(
+                        LF_JOB_STORE,
+                        "readwrite"
+                    );
+
+                transaction
+                    .objectStore(LF_JOB_STORE)
+                    .put(job);
+
+                transaction.oncomplete =
+                    function () {
+                        resolve(job);
+                    };
+
+                transaction.onerror =
+                    function () {
+                        reject(
+                            transaction.error ||
+                            new Error("Unable to save local job.")
+                        );
+                    };
+
+            });
+
+        }
+
+
+        async function getLocalJob(jobId) {
+
+            if (!jobId) {
+                return null;
+            }
+
+            const db =
+                await openLeadForgeDB();
+
+            return new Promise(function (resolve, reject) {
+
+                const request =
+                    db.transaction(
+                        LF_JOB_STORE,
+                        "readonly"
+                    )
+                    .objectStore(LF_JOB_STORE)
+                    .get(jobId);
+
+                request.onsuccess =
+                    function () {
+                        resolve(request.result || null);
+                    };
+
+                request.onerror =
+                    function () {
+                        reject(
+                            request.error ||
+                            new Error("Unable to read local job.")
+                        );
+                    };
+
+            });
+
+        }
+
+
+        async function getAllLocalJobs() {
+
+            const db =
+                await openLeadForgeDB();
+
+            return new Promise(function (resolve, reject) {
+
+                const request =
+                    db.transaction(
+                        LF_JOB_STORE,
+                        "readonly"
+                    )
+                    .objectStore(LF_JOB_STORE)
+                    .getAll();
+
+                request.onsuccess =
+                    function () {
+                        resolve(
+                            Array.isArray(request.result)
+                                ? request.result
+                                : []
+                        );
+                    };
+
+                request.onerror =
+                    function () {
+                        reject(
+                            request.error ||
+                            new Error("Unable to read local history.")
+                        );
+                    };
+
+            });
+
+        }
+
+
+        async function mergeLocalJob(
+            jobId,
+            patch
+        ) {
+
+            if (!jobId) {
+                return null;
+            }
+
+            const existing =
+                await getLocalJob(jobId) ||
+                {
+                    job_id: jobId
+                };
+
+            const merged = {
+                ...existing,
+                ...(patch || {}),
+                job_id: jobId
+            };
+
+            await saveLocalJob(merged);
+
+            return merged;
+
+        }
+
 
 
 
@@ -3901,14 +4115,31 @@
                 collectFormData();
 
 
-            /*
-            VALIDATION
-            */
-
             if (data.platforms.length === 0) {
 
                 showToast(
                     "Select at least one source."
+                );
+
+                return;
+
+            }
+
+
+            /*
+            The current live provider is Gosom Google Maps.
+            Prevent a dead workflow when only an unavailable source
+            is selected.
+            */
+
+            if (
+                !data.platforms.includes(
+                    "google_maps"
+                )
+            ) {
+
+                showToast(
+                    "Current live scraper requires Google Maps to be selected."
                 );
 
                 return;
@@ -3956,17 +4187,13 @@
             }
 
 
-            /*
-            RESET PREVIOUS JOB
-            */
-
             stopPolling();
 
             currentResults = [];
-
-            lastResultCount = 0;
-
             currentJobId = null;
+            currentJobMeta = null;
+            currentRequestedQuantity =
+                Number(data.quantity || 0);
 
 
             document.getElementById(
@@ -3974,13 +4201,13 @@
             ).innerHTML = "";
 
             document.getElementById(
+                "resultCount"
+            ).textContent = "0";
+
+            document.getElementById(
                 "emptyResults"
             ).style.display = "block";
 
-
-            /*
-            SHOW UI
-            */
 
             document.getElementById(
                 "progressCard"
@@ -4006,17 +4233,11 @@
             updateProgress(
                 0,
                 "Starting job...",
-                "Sending request to n8n...",
+                "Sending one start request to n8n...",
                 0,
                 data.quantity
             );
 
-
-            /*
-            ==========================================================
-                                DEMO MODE
-            ==========================================================
-            */
 
             if (
                 N8N_START_WEBHOOK ===
@@ -4037,31 +4258,24 @@
             isDemoMode = false;
 
 
-            /*
-            ==========================================================
-                                REAL N8N
-            ==========================================================
-            */
-
             try {
 
                 const response =
                     await fetch(
                         N8N_START_WEBHOOK,
                         {
-
                             method: "POST",
 
                             headers: {
                                 "Content-Type":
                                     "application/json",
+
                                 "Authorization":
                                     getLeadForgeAuthHeader()
                             },
 
                             body:
                                 JSON.stringify(data)
-
                         }
                     );
 
@@ -4079,16 +4293,6 @@
                     await response.json();
 
 
-                /*
-                Expected:
-        
-                {
-                    "job_id":"JOB-123",
-                    "status":"running"
-                }
-                */
-
-
                 if (!result.job_id) {
 
                     throw new Error(
@@ -4102,6 +4306,58 @@
                     result.job_id;
 
 
+                const now =
+                    new Date().toISOString();
+
+
+                currentJobMeta = {
+                    ...data,
+
+                    job_id:
+                        currentJobId,
+
+                    status:
+                        "running",
+
+                    progress:
+                        10,
+
+                    current_stage:
+                        "Google Maps scraper running",
+
+                    total_requested:
+                        Number(data.quantity || 0),
+
+                    total_found:
+                        0,
+
+                    total_valid:
+                        0,
+
+                    job_created_at:
+                        now,
+
+                    job_updated_at:
+                        now,
+
+                    leads:
+                        []
+                };
+
+
+                try {
+                    await saveLocalJob(
+                        currentJobMeta
+                    );
+                }
+                catch (historyError) {
+                    console.log(
+                        "Local history save error:",
+                        historyError
+                    );
+                }
+
+
                 showToast(
                     "Job " +
                     currentJobId +
@@ -4109,19 +4365,22 @@
                 );
 
 
-                /*
-                START POLLING
-                */
-
-                startPolling(
+                startLocalProgress(
                     data.quantity
                 );
 
+
+                startPolling(
+                    data.quantity,
+                    data.verify_emails
+                );
 
             }
             catch (error) {
 
                 console.error(error);
+
+                stopPolling();
 
                 showError(
                     "Unable to start n8n job."
@@ -4136,83 +4395,250 @@
 
         /*
         ==============================================================
-                            POLLING
+                    LOW-FREQUENCY ADAPTIVE CHECKING
+        ==============================================================
+
+        Gosom can take several minutes before results are ready.
+        Instead of two requests every 5 seconds, the frontend makes
+        one combined check after a realistic delay and backs off.
         ==============================================================
         */
 
-        function startPolling(totalQuantity) {
+        function getFirstCheckDelay(
+            quantity,
+            verifyEmails
+        ) {
 
-            /*
-            STATUS
-            */
+            const q =
+                Number(quantity || 100);
 
-            statusInterval =
-                setInterval(
+            let delay;
+
+            if (q <= 500) {
+                delay = 180000;
+            }
+            else if (q <= 1000) {
+                delay = 210000;
+            }
+            else if (q <= 2500) {
+                delay = 270000;
+            }
+            else {
+                delay = 360000;
+            }
+
+
+            if (verifyEmails) {
+                delay += 60000;
+            }
+
+
+            return delay;
+
+        }
+
+
+        function getNextCheckDelay() {
+
+            const delays = [
+                90000,
+                120000,
+                180000,
+                240000,
+                300000
+            ];
+
+
+            return delays[
+                Math.min(
+                    checkAttempt,
+                    delays.length - 1
+                )
+            ];
+
+        }
+
+
+        function startPolling(
+            totalQuantity,
+            verifyEmails
+        ) {
+
+            checkAttempt = 0;
+
+            scheduleNextJobCheck(
+                getFirstCheckDelay(
+                    totalQuantity,
+                    verifyEmails
+                ),
+                totalQuantity
+            );
+
+        }
+
+
+        function scheduleNextJobCheck(
+            delay,
+            totalQuantity
+        ) {
+
+            if (checkTimer) {
+
+                clearTimeout(
+                    checkTimer
+                );
+
+            }
+
+
+            checkTimer =
+                setTimeout(
                     function () {
 
-                        fetchJobStatus(
+                        fetchJobCheck(
                             totalQuantity
                         );
 
                     },
-                    5000
+                    delay
                 );
-
-
-            /*
-            RESULTS
-            */
-
-            resultsInterval =
-                setInterval(
-                    function () {
-
-                        fetchJobResults();
-
-                    },
-                    5000
-                );
-
-
-            /*
-            IMMEDIATE CHECK
-            */
-
-            fetchJobStatus(
-                totalQuantity
-            );
-
-            fetchJobResults();
 
         }
 
-
-        /*
-        ==============================================================
-                            STOP POLLING
-        ==============================================================
-        */
 
         function stopPolling() {
 
-            if (statusInterval) {
+            if (checkTimer) {
 
-                clearInterval(
-                    statusInterval
+                clearTimeout(
+                    checkTimer
                 );
 
-                statusInterval = null;
+                checkTimer = null;
 
             }
 
 
-            if (resultsInterval) {
+            stopLocalProgress();
 
-                clearInterval(
-                    resultsInterval
+        }
+
+
+        /*
+        ==============================================================
+                        LOCAL PROGRESS ANIMATION
+        ==============================================================
+
+        This is visual only. It makes ZERO n8n requests.
+        Real completion still comes from the job-check webhook.
+        ==============================================================
+        */
+
+        function startLocalProgress(
+            totalQuantity
+        ) {
+
+            stopLocalProgress();
+
+            const startedAt =
+                Date.now();
+
+            localProgressValue = 8;
+
+
+            localProgressTimer =
+                setInterval(
+                    function () {
+
+                        const elapsed =
+                            (
+                                Date.now() -
+                                startedAt
+                            ) / 1000;
+
+
+                        let target = 25;
+                        let detail =
+                            "Starting Google Maps scraper...";
+
+
+                        if (elapsed >= 30) {
+
+                            target = 48;
+                            detail =
+                                "Searching Google Maps...";
+
+                        }
+
+
+                        if (elapsed >= 90) {
+
+                            target = 70;
+                            detail =
+                                "Collecting business details...";
+
+                        }
+
+
+                        if (elapsed >= 180) {
+
+                            target = 86;
+                            detail =
+                                "Processing and deduplicating leads...";
+
+                        }
+
+
+                        if (elapsed >= 300) {
+
+                            target = 92;
+                            detail =
+                                "Finalizing the lead list...";
+
+                        }
+
+
+                        localProgressValue +=
+                            Math.max(
+                                0.35,
+                                (
+                                    target -
+                                    localProgressValue
+                                ) * 0.07
+                            );
+
+
+                        localProgressValue =
+                            Math.min(
+                                target,
+                                localProgressValue
+                            );
+
+
+                        updateProgress(
+                            localProgressValue,
+                            "Scraping in progress",
+                            detail,
+                            currentResults.length,
+                            totalQuantity
+                        );
+
+                    },
+                    2500
                 );
 
-                resultsInterval = null;
+        }
+
+
+        function stopLocalProgress() {
+
+            if (localProgressTimer) {
+
+                clearInterval(
+                    localProgressTimer
+                );
+
+                localProgressTimer = null;
 
             }
 
@@ -4221,11 +4647,11 @@
 
         /*
         ==============================================================
-                            STATUS REQUEST
+                            ONE JOB CHECK
         ==============================================================
         */
 
-        async function fetchJobStatus(
+        async function fetchJobCheck(
             totalQuantity
         ) {
 
@@ -4234,162 +4660,19 @@
             }
 
 
-            try {
+            /*
+            Do not spend executions while the browser tab is hidden.
+            */
 
-                const response =
-                    await fetch(
-                        N8N_STATUS_WEBHOOK +
-                        "?job_id=" +
-                        encodeURIComponent(
-                            currentJobId
-                        ),
-                        {
-                            headers: {
-                                "Authorization":
-                                    getLeadForgeAuthHeader()
-                            }
-                        }
-                    );
+            if (document.hidden) {
 
-
-                if (!response.ok) {
-                    return;
-                }
-
-
-                const status =
-                    await response.json();
-
-
-                /*
-                Expected:
-        
-                {
-                    "job_id":"JOB-123",
-                    "status":"running",
-                    "progress":68,
-                    "found":682,
-                    "total":1000,
-                    "stage":"Extracting emails"
-                }
-                */
-
-
-                const progress =
-                    Number(
-                        status.progress || 0
-                    );
-
-
-                const found =
-                    Number(
-                        status.found || 0
-                    );
-
-
-                const total =
-                    Number(
-                        status.total ||
-                        totalQuantity
-                    );
-
-
-                updateProgress(
-                    progress,
-                    formatStatus(
-                        status.status
-                    ),
-                    status.stage ||
-                    "Processing...",
-                    found,
-                    total
+                scheduleNextJobCheck(
+                    120000,
+                    totalQuantity
                 );
 
-
-                /*
-                JOB COMPLETED
-                */
-
-                if (
-                    status.status ===
-                    "completed"
-                ) {
-
-                    updateProgress(
-                        100,
-                        "Completed",
-                        "Lead generation completed.",
-                        found,
-                        total
-                    );
-
-
-                    stopPolling();
-
-                    resetGenerateButton();
-
-                    markCompleted();
-
-                    /*
-                    One final result request
-                    */
-
-                    fetchJobResults();
-
-                    showToast(
-                        "Lead generation completed."
-                    );
-
-                    setTimeout(function () {
-                        loadHistory(false);
-                    }, 800);
-
-                }
-
-
-                /*
-                JOB FAILED
-                */
-
-                if (
-                    status.status ===
-                    "failed"
-                ) {
-
-                    stopPolling();
-
-                    showError(
-                        status.message ||
-                        "Lead generation failed."
-                    );
-
-                    resetGenerateButton();
-
-                }
-
-            }
-            catch (error) {
-
-                console.log(
-                    "Status polling error:",
-                    error
-                );
-
-            }
-
-        }
-
-
-        /*
-        ==============================================================
-                            RESULTS REQUEST
-        ==============================================================
-        */
-
-        async function fetchJobResults() {
-
-            if (!currentJobId) {
                 return;
+
             }
 
 
@@ -4397,7 +4680,7 @@
 
                 const response =
                     await fetch(
-                        N8N_RESULTS_WEBHOOK +
+                        N8N_CHECK_WEBHOOK +
                         "?job_id=" +
                         encodeURIComponent(
                             currentJobId
@@ -4405,14 +4688,24 @@
                         {
                             headers: {
                                 "Authorization":
-                                    getLeadForgeAuthHeader()
-                            }
+                                    getLeadForgeAuthHeader(),
+
+                                "Accept":
+                                    "application/json"
+                            },
+
+                            cache:
+                                "no-store"
                         }
                     );
 
 
                 if (!response.ok) {
-                    return;
+
+                    throw new Error(
+                        "Job check failed"
+                    );
+
                 }
 
 
@@ -4420,44 +4713,223 @@
                     await response.json();
 
 
-                /*
-                Expected:
-        
-                {
-                    "job_id":"JOB-123",
-                    "leads":[
-                        {...},
-                        {...}
-                    ]
+                const status =
+                    String(
+                        data.status ||
+                        "running"
+                    ).toLowerCase();
+
+
+                const found =
+                    Number(
+                        data.found || 0
+                    );
+
+
+                const total =
+                    Number(
+                        data.total ||
+                        totalQuantity ||
+                        currentRequestedQuantity ||
+                        0
+                    );
+
+
+                try {
+
+                    currentJobMeta =
+                        await mergeLocalJob(
+                            currentJobId,
+                            {
+                                status:
+                                    status,
+
+                                progress:
+                                    Number(
+                                        data.progress || 0
+                                    ),
+
+                                current_stage:
+                                    data.stage ||
+                                    "Processing...",
+
+                                total_requested:
+                                    total,
+
+                                total_found:
+                                    found,
+
+                                total_valid:
+                                    Number(
+                                        data.valid || 0
+                                    ),
+
+                                job_updated_at:
+                                    new Date().toISOString()
+                            }
+                        );
+
                 }
-                */
+                catch (historyError) {
 
-
-                if (
-                    Array.isArray(
-                        data.leads
-                    )
-                ) {
-
-                    /*
-                    Replace current results with latest
-                    server result list.
-        
-                    Duplicate protection happens below.
-                    */
-
-                    addNewLeads(
-                        data.leads
+                    console.log(
+                        "Local job update error:",
+                        historyError
                     );
 
                 }
+
+
+                if (
+                    status ===
+                    "completed"
+                ) {
+
+                    stopPolling();
+
+
+                    const leads =
+                        Array.isArray(
+                            data.leads
+                        )
+                            ? data.leads
+                            : [];
+
+
+                    addNewLeads(
+                        leads
+                    );
+
+
+                    updateProgress(
+                        100,
+                        "Completed",
+                        "Lead generation completed.",
+                        found || currentResults.length,
+                        total
+                    );
+
+
+                    markCompleted();
+
+                    resetGenerateButton();
+
+
+                    try {
+
+                        currentJobMeta =
+                            await mergeLocalJob(
+                                currentJobId,
+                                {
+                                    status:
+                                        "completed",
+
+                                    progress:
+                                        100,
+
+                                    current_stage:
+                                        "Completed",
+
+                                    total_requested:
+                                        total,
+
+                                    total_found:
+                                        found || currentResults.length,
+
+                                    total_valid:
+                                        Number(
+                                            data.valid ||
+                                            currentResults.length
+                                        ),
+
+                                    job_updated_at:
+                                        new Date().toISOString(),
+
+                                    leads:
+                                        currentResults
+                                }
+                            );
+
+                    }
+                    catch (historyError) {
+
+                        console.log(
+                            "Completed history save error:",
+                            historyError
+                        );
+
+                    }
+
+
+                    loadHistory(false);
+
+
+                    showToast(
+                        "Lead generation completed."
+                    );
+
+
+                    return;
+
+                }
+
+
+                if (
+                    status ===
+                    "failed"
+                ) {
+
+                    stopPolling();
+
+                    showError(
+                        data.message ||
+                        "Lead generation failed."
+                    );
+
+                    resetGenerateButton();
+
+                    loadHistory(false);
+
+                    return;
+
+                }
+
+
+                /*
+                Still running: use local visual progress and wait longer
+                before the next REAL backend request.
+                */
+
+                checkAttempt += 1;
+
+
+                scheduleNextJobCheck(
+                    getNextCheckDelay(),
+                    totalQuantity
+                );
 
             }
             catch (error) {
 
                 console.log(
-                    "Results polling error:",
+                    "Job check error:",
                     error
+                );
+
+
+                checkAttempt += 1;
+
+
+                /*
+                Network errors also back off instead of retrying fast.
+                */
+
+                scheduleNextJobCheck(
+                    Math.max(
+                        120000,
+                        getNextCheckDelay()
+                    ),
+                    totalQuantity
                 );
 
             }
@@ -4985,29 +5457,32 @@
 
             }
 
+
+            const job =
+                historyJobs.find(function (item) {
+
+                    return (
+                        item.job_id ===
+                        currentJobId
+                    );
+
+                }) ||
+                currentJobMeta ||
+                {};
+
+
             buildAndDownloadCSV(
                 currentResults,
                 currentJobId,
-                getHistoryJobLabel(
-                    historyJobs.find(function (job) {
-                        return job.job_id === currentJobId;
-                    }) || {}
-                )
+                getHistoryJobLabel(job)
             );
 
         }
 
 
-        function buildAndDownloadCSV(
-            leads,
-            jobId,
-            label
+        function buildCSVContent(
+            leads
         ) {
-
-            if (!Array.isArray(leads) || !leads.length) {
-                showToast("No leads available to download.");
-                return;
-            }
 
             const headers = [
                 "Business Name",
@@ -5021,121 +5496,345 @@
                 "Status"
             ];
 
-            const rows = leads.map(function (lead) {
-                return [
-                    lead.business_name || "",
-                    lead.email || "",
-                    lead.phone || "",
-                    lead.website || "",
-                    lead.address || "",
-                    lead.city || "",
-                    lead.state || "",
-                    lead.country || "",
-                    lead.status || ""
-                ];
-            });
 
-            const csv = [headers, ...rows]
+            const rows =
+                leads.map(function (lead) {
+
+                    return [
+                        lead.business_name || "",
+                        lead.email || "",
+                        lead.phone || "",
+                        lead.website || "",
+                        lead.address || "",
+                        lead.city || "",
+                        lead.state || "",
+                        lead.country || "",
+                        lead.status || ""
+                    ];
+
+                });
+
+
+            return [headers, ...rows]
                 .map(function (row) {
-                    return row.map(function (value) {
-                        return '"' + String(value).replace(/"/g, '""') + '"';
-                    }).join(",");
+
+                    return row
+                        .map(function (value) {
+
+                            return (
+                                '"' +
+                                String(value)
+                                    .replace(
+                                        /"/g,
+                                        '""'
+                                    ) +
+                                '"'
+                            );
+
+                        })
+                        .join(",");
+
                 })
                 .join("\n");
 
-            const blob = new Blob(
-                [csv],
-                { type: "text/csv;charset=utf-8;" }
-            );
+        }
 
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement("a");
 
-            const safeLabel = String(label || "leads")
-                .replace(/[^a-z0-9]+/gi, "-")
-                .replace(/^-+|-+$/g, "")
-                .slice(0, 55) || "leads";
+        function createCSVFilename(
+            jobId,
+            label
+        ) {
 
-            link.href = url;
-            link.download =
+            const safeLabel =
+                String(label || "leads")
+                    .replace(
+                        /[^a-z0-9]+/gi,
+                        "-"
+                    )
+                    .replace(
+                        /^-+|-+$/g,
+                        ""
+                    )
+                    .slice(
+                        0,
+                        55
+                    ) ||
+                "leads";
+
+
+            const date =
+                new Date()
+                    .toISOString()
+                    .slice(
+                        0,
+                        10
+                    );
+
+
+            const shortId =
+                String(jobId || "")
+                    .split("-")
+                    .pop()
+                    .slice(
+                        -8
+                    );
+
+
+            return (
                 "leadforge-" +
                 safeLabel.toLowerCase() +
                 "-" +
-                new Date().toISOString().slice(0, 10) +
-                ".csv";
+                date +
+                (
+                    shortId
+                        ? "-" + shortId
+                        : ""
+                ) +
+                ".csv"
+            );
 
-            document.body.appendChild(link);
+        }
+
+
+        function triggerCSVDownload(
+            csv,
+            filename
+        ) {
+
+            const blob =
+                new Blob(
+                    [csv],
+                    {
+                        type:
+                            "text/csv;charset=utf-8;"
+                    }
+                );
+
+
+            const url =
+                URL.createObjectURL(
+                    blob
+                );
+
+
+            const link =
+                document.createElement(
+                    "a"
+                );
+
+
+            link.href =
+                url;
+
+
+            link.download =
+                filename;
+
+
+            document.body.appendChild(
+                link
+            );
+
+
             link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
+
+
+            document.body.removeChild(
+                link
+            );
+
+
+            URL.revokeObjectURL(
+                url
+            );
+
+        }
+
+
+        function buildAndDownloadCSV(
+            leads,
+            jobId,
+            label
+        ) {
+
+            if (
+                !Array.isArray(leads) ||
+                !leads.length
+            ) {
+
+                showToast(
+                    "No leads available to download."
+                );
+
+                return;
+
+            }
+
+
+            const csv =
+                buildCSVContent(
+                    leads
+                );
+
+
+            const filename =
+                createCSVFilename(
+                    jobId,
+                    label
+                );
+
+
+            triggerCSVDownload(
+                csv,
+                filename
+            );
+
 
             if (jobId) {
-                trackDownload(jobId);
+
+                trackDownload(
+                    jobId,
+                    csv,
+                    filename
+                );
+
             }
 
         }
 
 
-        async function trackDownload(jobId) {
+        /*
+        Download tracking is local only.
+        Zero n8n executions are used here.
+        */
+
+        async function trackDownload(
+            jobId,
+            csv,
+            filename
+        ) {
 
             try {
 
-                const response = await fetch(
-                    N8N_DOWNLOAD_WEBHOOK,
+                const existing =
+                    await getLocalJob(
+                        jobId
+                    ) ||
                     {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            "Authorization": getLeadForgeAuthHeader()
-                        },
-                        body: JSON.stringify({
-                            job_id: jobId,
-                            downloaded_at: new Date().toISOString()
-                        })
-                    }
+                        job_id:
+                            jobId
+                    };
+
+
+                const updated = {
+                    ...existing,
+
+                    downloaded_at:
+                        new Date()
+                            .toISOString(),
+
+                    download_count:
+                        Number(
+                            existing.download_count ||
+                            0
+                        ) +
+                        1,
+
+                    csv_content:
+                        csv ||
+                        existing.csv_content ||
+                        "",
+
+                    csv_filename:
+                        filename ||
+                        existing.csv_filename ||
+                        ""
+                };
+
+
+                await saveLocalJob(
+                    updated
                 );
 
-                if (!response.ok) {
-                    throw new Error("Download tracking failed");
-                }
 
-                setTimeout(function () {
+                if (
+                    activeWorkspaceView !==
+                    "generator"
+                ) {
+
                     loadHistory(false);
-                }, 300);
+
+                }
 
             }
             catch (error) {
-                console.log("Download tracking error:", error);
+
+                console.log(
+                    "Local download tracking error:",
+                    error
+                );
+
             }
 
         }
 
 
-        async function downloadSavedJob(jobId) {
+        async function downloadSavedJob(
+            jobId
+        ) {
 
             try {
 
-                const response = await fetch(
-                    N8N_RESULTS_WEBHOOK +
-                    "?job_id=" +
-                    encodeURIComponent(jobId),
-                    {
-                        headers: {
-                            "Authorization": getLeadForgeAuthHeader()
-                        }
-                    }
-                );
+                const job =
+                    await getLocalJob(
+                        jobId
+                    );
 
-                if (!response.ok) {
-                    throw new Error("Unable to load saved leads");
+
+                if (!job) {
+
+                    throw new Error(
+                        "Saved job not found"
+                    );
+
                 }
 
-                const data = await response.json();
-                const leads = Array.isArray(data.leads) ? data.leads : [];
 
-                const job = historyJobs.find(function (item) {
-                    return item.job_id === jobId;
-                }) || {};
+                /*
+                If the CSV was downloaded before, reuse the exact locally
+                stored CSV content. Otherwise generate it from saved leads.
+                */
+
+                if (
+                    job.csv_content &&
+                    job.csv_filename
+                ) {
+
+                    triggerCSVDownload(
+                        job.csv_content,
+                        job.csv_filename
+                    );
+
+
+                    trackDownload(
+                        jobId,
+                        job.csv_content,
+                        job.csv_filename
+                    );
+
+
+                    return;
+
+                }
+
+
+                const leads =
+                    Array.isArray(
+                        job.leads
+                    )
+                        ? job.leads
+                        : [];
+
 
                 buildAndDownloadCSV(
                     leads,
@@ -5145,8 +5844,13 @@
 
             }
             catch (error) {
+
                 console.error(error);
-                showToast("Unable to download this saved search.");
+
+                showToast(
+                    "Unable to download this saved search."
+                );
+
             }
 
         }
@@ -5439,6 +6143,107 @@
 
         /*
         ==============================================================
+                        RESUME A RUNNING LOCAL JOB
+        ==============================================================
+
+        If the page was closed/reloaded while Gosom was working, one
+        pending job can be resumed from IndexedDB. This avoids losing
+        the final result while still keeping backend checks minimal.
+        ==============================================================
+        */
+
+        function resumeLatestRunningJob() {
+
+            const runningJob =
+                historyJobs.find(
+                    function (job) {
+
+                        const status =
+                            String(
+                                job.status || ""
+                            ).toLowerCase();
+
+                        return (
+                            status === "running" ||
+                            status === "queued" ||
+                            status === "processing"
+                        );
+
+                    }
+                );
+
+
+            if (!runningJob) {
+                return;
+            }
+
+
+            currentJobId =
+                runningJob.job_id;
+
+            currentJobMeta =
+                runningJob;
+
+            currentRequestedQuantity =
+                Number(
+                    runningJob.total_requested ||
+                    runningJob.quantity ||
+                    0
+                );
+
+
+            currentResults =
+                Array.isArray(
+                    runningJob.leads
+                )
+                    ? runningJob.leads
+                    : [];
+
+
+            document.getElementById(
+                "progressCard"
+            ).classList.add("show");
+
+
+            document.getElementById(
+                "resultsCard"
+            ).classList.add("show");
+
+
+            document.getElementById(
+                "generateBtn"
+            ).disabled = true;
+
+
+            document.getElementById(
+                "generateBtn"
+            ).innerHTML =
+                "<span>Job Running...</span>";
+
+
+            startLocalProgress(
+                currentRequestedQuantity
+            );
+
+
+            checkAttempt = 0;
+
+
+            /*
+            A single recovery check after reload. If still running,
+            normal adaptive backoff continues.
+            */
+
+            scheduleNextJobCheck(
+                15000,
+                currentRequestedQuantity
+            );
+
+        }
+
+
+        /*
+        ==============================================================
                     WORKSPACE / SEARCH HISTORY
         ==============================================================
         */
@@ -5516,55 +6321,77 @@
 
             try {
 
-                const response = await fetch(
-                    N8N_HISTORY_WEBHOOK,
-                    {
-                        headers: {
-                            "Authorization": getLeadForgeAuthHeader(),
-                            "Accept": "application/json"
-                        },
-                        cache: "no-store"
+                historyJobs =
+                    await getAllLocalJobs();
+
+
+                historyJobs.sort(
+                    function (a, b) {
+
+                        const aTime =
+                            new Date(
+                                a.job_created_at ||
+                                a.job_updated_at ||
+                                0
+                            ).getTime();
+
+
+                        const bTime =
+                            new Date(
+                                b.job_created_at ||
+                                b.job_updated_at ||
+                                0
+                            ).getTime();
+
+
+                        return (
+                            bTime -
+                            aTime
+                        );
+
                     }
                 );
 
-                if (!response.ok) {
-                    throw new Error("History webhook failed");
-                }
-
-                const data = await response.json();
-
-                historyJobs = Array.isArray(data)
-                    ? data
-                    : (
-                        Array.isArray(data.jobs)
-                            ? data.jobs
-                            : []
-                    );
-
-                historyJobs.sort(function (a, b) {
-                    const aTime = new Date(
-                        a.job_created_at || a.job_updated_at || 0
-                    ).getTime();
-                    const bTime = new Date(
-                        b.job_created_at || b.job_updated_at || 0
-                    ).getTime();
-                    return bTime - aTime;
-                });
 
                 renderSearchHistory();
                 renderDownloadHistory();
 
+
                 if (showMessage) {
-                    showToast("History refreshed.");
+
+                    showToast(
+                        "Local history refreshed."
+                    );
+
                 }
 
             }
             catch (error) {
-                console.log("History loading error:", error);
 
-                if (showMessage || activeWorkspaceView !== "generator") {
-                    showToast("Unable to load saved search history.");
+                console.log(
+                    "Local history loading error:",
+                    error
+                );
+
+
+                historyJobs = [];
+
+                renderSearchHistory();
+                renderDownloadHistory();
+
+
+                if (
+                    showMessage ||
+                    activeWorkspaceView !==
+                    "generator"
+                ) {
+
+                    showToast(
+                        "Unable to load local search history."
+                    );
+
                 }
+
             }
 
         }
@@ -5615,7 +6442,7 @@
                     <td><span class="history-status ${escapeAttribute(status)}">${escapeHTML(status)}</span></td>
                     <td>
                         <div class="history-actions">
-                            <button class="history-btn primary" type="button" onclick="openSavedSearch('${escapeJSString(job.job_id || "")}')">View Leads</button>
+                            <button class="history-btn primary" type="button" onclick="openSavedSearch('${escapeJSString(job.job_id || "")}')" ${found ? "" : "disabled"}>View Leads</button>
                             <button class="history-btn" type="button" onclick="downloadSavedJob('${escapeJSString(job.job_id || "")}')" ${found ? "" : "disabled"}>↓ CSV</button>
                         </div>
                     </td>
@@ -5689,61 +6516,111 @@
                 return;
             }
 
-            showWorkspaceView("generator");
+
+            showWorkspaceView(
+                "generator"
+            );
+
 
             stopPolling();
-            currentJobId = jobId;
-            currentResults = [];
-            lastResultCount = 0;
 
-            document.getElementById("resultsBody").innerHTML = "";
-            document.getElementById("resultCount").textContent = "0";
-            document.getElementById("emptyResults").style.display = "block";
-            document.getElementById("resultsCard").classList.add("show");
-            document.getElementById("progressCard").classList.remove("show");
+            currentJobId =
+                jobId;
+
+            currentResults = [];
+
+
+            document.getElementById(
+                "resultsBody"
+            ).innerHTML = "";
+
+            document.getElementById(
+                "resultCount"
+            ).textContent = "0";
+
+            document.getElementById(
+                "emptyResults"
+            ).style.display = "block";
+
+            document.getElementById(
+                "resultsCard"
+            ).classList.add("show");
+
+            document.getElementById(
+                "progressCard"
+            ).classList.remove("show");
+
 
             try {
 
-                const response = await fetch(
-                    N8N_RESULTS_WEBHOOK +
-                    "?job_id=" +
-                    encodeURIComponent(jobId),
-                    {
-                        headers: {
-                            "Authorization": getLeadForgeAuthHeader()
-                        }
-                    }
-                );
+                const job =
+                    await getLocalJob(
+                        jobId
+                    );
 
-                if (!response.ok) {
-                    throw new Error("Saved search results failed");
+
+                if (!job) {
+
+                    throw new Error(
+                        "Saved search not found"
+                    );
+
                 }
 
-                const data = await response.json();
-                const leads = Array.isArray(data.leads) ? data.leads : [];
 
-                addNewLeads(leads);
+                currentJobMeta =
+                    job;
 
-                const job = historyJobs.find(function (item) {
-                    return item.job_id === jobId;
-                });
+
+                const leads =
+                    Array.isArray(
+                        job.leads
+                    )
+                        ? job.leads
+                        : [];
+
+
+                addNewLeads(
+                    leads
+                );
+
 
                 showToast(
                     leads.length.toLocaleString() +
-                    " leads loaded" +
-                    (job ? " from " + formatHistoryDate(job.job_created_at) : "") +
+                    " leads loaded from local history" +
+                    (
+                        job.job_created_at
+                            ? " (" +
+                              formatHistoryDate(
+                                  job.job_created_at
+                              ) +
+                              ")"
+                            : ""
+                    ) +
                     "."
                 );
 
-                document.getElementById("resultsCard").scrollIntoView({
-                    behavior: "smooth",
-                    block: "start"
-                });
+
+                document.getElementById(
+                    "resultsCard"
+                )
+                    .scrollIntoView({
+                        behavior:
+                            "smooth",
+
+                        block:
+                            "start"
+                    });
 
             }
             catch (error) {
+
                 console.error(error);
-                showToast("Unable to load saved leads.");
+
+                showToast(
+                    "Unable to load saved leads."
+                );
+
             }
 
         }
@@ -5884,7 +6761,10 @@
 
         updateCredits();
 
-        loadHistory(false);
+        loadHistory(false)
+            .then(function () {
+                resumeLatestRunningJob();
+            });
 
     </script>
 
