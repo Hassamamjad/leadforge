@@ -4087,6 +4087,21 @@
 
         function logoutLeadForge() {
 
+            /*
+            Stop all local timers and clear the active-job resume marker.
+            This prevents a previous running job from automatically
+            resuming backend checks after the user logs in again.
+            */
+            try {
+                stopPolling();
+                stopLocalProgress();
+            }
+            catch (e) {}
+
+            sessionStorage.removeItem(
+                "leadforge_active_job_id"
+            );
+
             sessionStorage.removeItem(
                 "leadforge_auth"
             );
@@ -4304,6 +4319,17 @@
 
                 currentJobId =
                     result.job_id;
+
+
+                /*
+                Remember the active job only for this authenticated browser
+                session. A normal page refresh can resume it, but logout
+                removes this marker so a fresh login never auto-resumes it.
+                */
+                sessionStorage.setItem(
+                    "leadforge_active_job_id",
+                    currentJobId
+                );
 
 
                 const now =
@@ -4812,6 +4838,10 @@
 
                     markCompleted();
 
+                    sessionStorage.removeItem(
+                        "leadforge_active_job_id"
+                    );
+
                     resetGenerateButton();
 
 
@@ -4884,6 +4914,10 @@
                     showError(
                         data.message ||
                         "Lead generation failed."
+                    );
+
+                    sessionStorage.removeItem(
+                        "leadforge_active_job_id"
                     );
 
                     resetGenerateButton();
@@ -6154,6 +6188,23 @@
 
         function resumeLatestRunningJob() {
 
+            /*
+            Resume only a job that was started in the CURRENT browser
+            login session. IndexedDB history may contain an older job still
+            marked running, and that must not trigger n8n checks after logout
+            and a fresh login.
+            */
+            const activeJobId =
+                sessionStorage.getItem(
+                    "leadforge_active_job_id"
+                );
+
+
+            if (!activeJobId) {
+                return;
+            }
+
+
             const runningJob =
                 historyJobs.find(
                     function (job) {
@@ -6164,9 +6215,12 @@
                             ).toLowerCase();
 
                         return (
-                            status === "running" ||
-                            status === "queued" ||
-                            status === "processing"
+                            job.job_id === activeJobId &&
+                            (
+                                status === "running" ||
+                                status === "queued" ||
+                                status === "processing"
+                            )
                         );
 
                     }
@@ -6174,6 +6228,11 @@
 
 
             if (!runningJob) {
+
+                sessionStorage.removeItem(
+                    "leadforge_active_job_id"
+                );
+
                 return;
             }
 
