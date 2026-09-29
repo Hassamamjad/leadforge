@@ -4322,14 +4322,9 @@
 
 
                 /*
-                Remember the active job only for this authenticated browser
-                session. A normal page refresh can resume it, but logout
-                removes this marker so a fresh login never auto-resumes it.
+                No active-job resume marker is stored.
+                A scrape can only begin from an explicit Generate Leads click.
                 */
-                sessionStorage.setItem(
-                    "leadforge_active_job_id",
-                    currentJobId
-                );
 
 
                 const now =
@@ -6189,114 +6184,14 @@
         function resumeLatestRunningJob() {
 
             /*
-            Resume only a job that was started in the CURRENT browser
-            login session. IndexedDB history may contain an older job still
-            marked running, and that must not trigger n8n checks after logout
-            and a fresh login.
+            Auto resume is intentionally disabled.
+            Only startLeadJob(), called by the Generate Leads button, may
+            start/schedule backend job checks.
             */
-            const activeJobId =
-                sessionStorage.getItem(
-                    "leadforge_active_job_id"
-                );
-
-
-            if (!activeJobId) {
-                return;
-            }
-
-
-            const runningJob =
-                historyJobs.find(
-                    function (job) {
-
-                        const status =
-                            String(
-                                job.status || ""
-                            ).toLowerCase();
-
-                        return (
-                            job.job_id === activeJobId &&
-                            (
-                                status === "running" ||
-                                status === "queued" ||
-                                status === "processing"
-                            )
-                        );
-
-                    }
-                );
-
-
-            if (!runningJob) {
-
-                sessionStorage.removeItem(
-                    "leadforge_active_job_id"
-                );
-
-                return;
-            }
-
-
-            currentJobId =
-                runningJob.job_id;
-
-            currentJobMeta =
-                runningJob;
-
-            currentRequestedQuantity =
-                Number(
-                    runningJob.total_requested ||
-                    runningJob.quantity ||
-                    0
-                );
-
-
-            currentResults =
-                Array.isArray(
-                    runningJob.leads
-                )
-                    ? runningJob.leads
-                    : [];
-
-
-            document.getElementById(
-                "progressCard"
-            ).classList.add("show");
-
-
-            document.getElementById(
-                "resultsCard"
-            ).classList.add("show");
-
-
-            document.getElementById(
-                "generateBtn"
-            ).disabled = true;
-
-
-            document.getElementById(
-                "generateBtn"
-            ).innerHTML =
-                "<span>Job Running...</span>";
-
-
-            startLocalProgress(
-                currentRequestedQuantity
+            sessionStorage.removeItem(
+                "leadforge_active_job_id"
             );
-
-
-            checkAttempt = 0;
-
-
-            /*
-            A single recovery check after reload. If still running,
-            normal adaptive backoff continues.
-            */
-
-            scheduleNextJobCheck(
-                15000,
-                currentRequestedQuantity
-            );
+            return;
 
         }
 
@@ -6816,14 +6711,21 @@
         ==============================================================
         */
 
+        /*
+        IMPORTANT: never auto-resume a previous job on login/page load.
+        Old versions stored this marker in sessionStorage; clear it so a
+        stale browser session can never trigger the Job Check webhook.
+        */
+        sessionStorage.removeItem(
+            "leadforge_active_job_id"
+        );
+
         initLocationSelectors();
 
         updateCredits();
 
-        loadHistory(false)
-            .then(function () {
-                resumeLatestRunningJob();
-            });
+        /* Local IndexedDB only. This does not call n8n. */
+        loadHistory(false);
 
     </script>
 
