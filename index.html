@@ -4432,73 +4432,46 @@
             verifyEmails
         ) {
 
-            const q =
-                Number(quantity || 100);
-
-            /*
-            Gosom Web/API jobs normally need at least ~3 minutes before
-            results are available. We still avoid rapid polling, but the
-            first check now happens close enough to completion that the UI
-            does not sit at 92% for several extra minutes.
-            */
-
+            const q = Number(quantity || 100);
             let delay;
 
             if (q <= 500) {
-                delay = 190000;
+                delay = 120000;
             }
             else if (q <= 1000) {
-                delay = 230000;
+                delay = 150000;
             }
             else if (q <= 2500) {
-                delay = 300000;
+                delay = 210000;
             }
             else {
-                delay = 420000;
+                delay = 300000;
             }
-
 
             if (verifyEmails) {
                 delay += 30000;
             }
 
-
             return delay;
-
         }
 
 
         function getNextCheckDelay() {
-
-            /*
-            After the first realistic wait, check more closely around the
-            expected finish window. This is still dramatically lighter than
-            old 5-second polling:
-              60s, 60s, 90s, 120s, 180s, then 240s.
-            */
 
             const delays = [
                 60000,
                 60000,
                 90000,
                 120000,
-                180000,
-                240000
+                180000
             ];
 
-
-            const index =
-                Math.max(
-                    0,
-                    Math.min(
-                        checkAttempt - 1,
-                        delays.length - 1
-                    )
-                );
-
-
-            return delays[index];
-
+            return delays[
+                Math.min(
+                    Math.max(checkAttempt - 1, 0),
+                    delays.length - 1
+                )
+            ];
         }
 
 
@@ -4551,34 +4524,9 @@
         }
 
 
-        // If the user switches to n8n/Railway while the scrape is running,
-        // no backend checks are spent in the hidden tab. As soon as the
-        // LeadForge tab becomes visible again, perform exactly one immediate
-        // check instead of waiting for the old timer.
-        document.addEventListener(
-            "visibilitychange",
-            function () {
+        // Switching browser tabs does not trigger a Job Check.
+        // Only the scheduled timer below may call n8n.
 
-                if (
-                    !document.hidden &&
-                    currentJobId &&
-                    !isDemoMode &&
-                    !checkInFlight
-                ) {
-
-                    if (checkTimer) {
-                        clearTimeout(checkTimer);
-                        checkTimer = null;
-                    }
-
-                    fetchJobCheck(
-                        currentRequestedQuantity ||
-                        Number(currentJobMeta?.total_requested || 0) ||
-                        100
-                    );
-                }
-            }
-        );
 
 
         function stopPolling() {
@@ -5130,6 +5078,15 @@
 
                 checkAttempt += 1;
 
+                if (checkAttempt >= 6) {
+                    stopPolling();
+                    showError(
+                        "The job did not publish a final status. Polling has been stopped to prevent extra n8n executions. Please retry the scrape once."
+                    );
+                    resetGenerateButton();
+                    currentJobId = null;
+                    return;
+                }
 
                 scheduleNextJobCheck(
                     getNextCheckDelay(),
@@ -5148,11 +5105,17 @@
                 consecutiveCheckErrors += 1;
                 checkAttempt += 1;
 
+                if (consecutiveCheckErrors >= 3 || checkAttempt >= 6) {
+                    stopPolling();
+                    showError(
+                        "The final job status could not be read from n8n. Polling has been stopped to prevent repeated executions."
+                    );
+                    resetGenerateButton();
+                    currentJobId = null;
+                    return;
+                }
 
-                /*
-                Retry network/check failures without hammering n8n.
-                First failure retries in 60s, then backs off.
-                */
+                /* Retry a temporary check failure with backoff. */
 
                 const retryDelay =
                     Math.min(
