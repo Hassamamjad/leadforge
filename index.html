@@ -2337,6 +2337,8 @@
 
         let checkTimer = null;
         let checkAttempt = 0;
+        let checkInFlight = false;
+        let consecutiveCheckErrors = 0;
 
         let localProgressTimer = null;
         let localProgressValue = 0;
@@ -4433,26 +4435,31 @@
             const q =
                 Number(quantity || 100);
 
+            /*
+            Gosom Web/API jobs normally need at least ~3 minutes before
+            results are available. We still avoid rapid polling, but the
+            first check now happens close enough to completion that the UI
+            does not sit at 92% for several extra minutes.
+            */
+
             let delay;
 
             if (q <= 500) {
-                // Current Gosom workflow commonly finishes around 3 minutes.
-                // Check a little later so most jobs need only ONE n8n check execution.
-                delay = 210000;
+                delay = 190000;
             }
             else if (q <= 1000) {
-                delay = 270000;
+                delay = 230000;
             }
             else if (q <= 2500) {
-                delay = 360000;
+                delay = 300000;
             }
             else {
-                delay = 480000;
+                delay = 420000;
             }
 
 
             if (verifyEmails) {
-                delay += 60000;
+                delay += 30000;
             }
 
 
@@ -4463,21 +4470,34 @@
 
         function getNextCheckDelay() {
 
+            /*
+            After the first realistic wait, check more closely around the
+            expected finish window. This is still dramatically lighter than
+            old 5-second polling:
+              60s, 60s, 90s, 120s, 180s, then 240s.
+            */
+
             const delays = [
+                60000,
+                60000,
+                90000,
+                120000,
                 180000,
-                240000,
-                300000,
-                360000,
-                420000
+                240000
             ];
 
 
-            return delays[
-                Math.min(
-                    checkAttempt,
-                    delays.length - 1
-                )
-            ];
+            const index =
+                Math.max(
+                    0,
+                    Math.min(
+                        checkAttempt - 1,
+                        delays.length - 1
+                    )
+                );
+
+
+            return delays[index];
 
         }
 
@@ -4488,6 +4508,8 @@
         ) {
 
             checkAttempt = 0;
+            checkInFlight = false;
+            consecutiveCheckErrors = 0;
 
             scheduleNextJobCheck(
                 getFirstCheckDelay(
@@ -4540,7 +4562,8 @@
                 if (
                     !document.hidden &&
                     currentJobId &&
-                    !isDemoMode
+                    !isDemoMode &&
+                    !checkInFlight
                 ) {
 
                     if (checkTimer) {
@@ -4641,22 +4664,40 @@
                         }
 
 
-                        if (elapsed >= 300) {
+                        if (elapsed >= 270) {
 
-                            target = 92;
+                            target = 93;
                             detail =
                                 "Finalizing the lead list...";
 
                         }
 
 
+                        if (elapsed >= 420) {
+
+                            target = 96;
+                            detail =
+                                "Scraper is still working — checking final status...";
+
+                        }
+
+
+                        if (elapsed >= 720) {
+
+                            target = 97;
+                            detail =
+                                "Long-running scrape — waiting for the backend watchdog...";
+
+                        }
+
+
                         localProgressValue +=
                             Math.max(
-                                0.35,
+                                0.20,
                                 (
                                     target -
                                     localProgressValue
-                                ) * 0.07
+                                ) * 0.06
                             );
 
 
@@ -4707,7 +4748,10 @@
             totalQuantity
         ) {
 
-            if (!currentJobId) {
+            if (
+                !currentJobId ||
+                checkInFlight
+            ) {
                 return;
             }
 
@@ -4719,13 +4763,16 @@
             if (document.hidden) {
 
                 scheduleNextJobCheck(
-                    120000,
+                    90000,
                     totalQuantity
                 );
 
                 return;
 
             }
+
+
+            checkInFlight = true;
 
 
             try {
@@ -4755,7 +4802,8 @@
                 if (!response.ok) {
 
                     throw new Error(
-                        "Job check failed"
+                        "Job check failed with HTTP " +
+                        response.status
                     );
 
                 }
@@ -4765,11 +4813,16 @@
                     await response.json();
 
 
+                consecutiveCheckErrors = 0;
+
+
                 const status =
                     String(
                         data.status ||
                         "running"
-                    ).toLowerCase();
+                    )
+                        .trim()
+                        .toLowerCase();
 
 
                 const found =
@@ -4787,6 +4840,19 @@
                     );
 
 
+                const backendProgress =
+                    Number(
+                        data.progress || 0
+                    );
+
+
+                const serverStage =
+                    String(
+                        data.stage ||
+                        "Processing..."
+                    );
+
+
                 try {
 
                     currentJobMeta =
@@ -4797,13 +4863,10 @@
                                     status,
 
                                 progress:
-                                    Number(
-                                        data.progress || 0
-                                    ),
+                                    backendProgress,
 
                                 current_stage:
-                                    data.stage ||
-                                    "Processing...",
+                                    serverStage,
 
                                 total_requested:
                                     total,
@@ -4836,6 +4899,10 @@
                     status ===
                     "completed"
                 ) {
+
+                    const finishedJobId =
+                        currentJobId;
+
 
                     stopPolling();
 
@@ -4875,7 +4942,7 @@
 
                         currentJobMeta =
                             await mergeLocalJob(
-                                currentJobId,
+                                finishedJobId,
                                 {
                                     status:
                                         "completed",
@@ -4917,6 +4984,16 @@
                     }
 
 
+                    /*
+                    Important:
+                    clear the active in-memory job as well. Previously the
+                    visibilitychange handler could keep calling n8n after a
+                    completed job, wasting check executions.
+                    */
+
+                    currentJobId = null;
+
+
                     loadHistory(false);
 
 
@@ -4930,16 +5007,33 @@
                 }
 
 
+                const failureStatuses =
+                    new Set([
+                        "failed",
+                        "error",
+                        "timeout",
+                        "timed_out",
+                        "cancelled",
+                        "canceled",
+                        "not_found"
+                    ]);
+
+
                 if (
-                    status ===
-                    "failed"
+                    failureStatuses.has(
+                        status
+                    )
                 ) {
+
+                    const failedJobId =
+                        currentJobId;
+
 
                     stopPolling();
 
                     showError(
                         data.message ||
-                        "Lead generation failed."
+                        "Lead generation failed. Please retry the job."
                     );
 
                     sessionStorage.removeItem(
@@ -4947,6 +5041,44 @@
                     );
 
                     resetGenerateButton();
+
+
+                    try {
+
+                        await mergeLocalJob(
+                            failedJobId,
+                            {
+                                status:
+                                    "failed",
+
+                                progress:
+                                    backendProgress,
+
+                                current_stage:
+                                    serverStage ||
+                                    "Failed",
+
+                                error_message:
+                                    data.message ||
+                                    "Lead generation failed.",
+
+                                job_updated_at:
+                                    new Date().toISOString()
+                            }
+                        );
+
+                    }
+                    catch (historyError) {
+
+                        console.log(
+                            "Failed history save error:",
+                            historyError
+                        );
+
+                    }
+
+
+                    currentJobId = null;
 
                     loadHistory(false);
 
@@ -4956,9 +5088,45 @@
 
 
                 /*
-                Still running: use local visual progress and wait longer
-                before the next REAL backend request.
+                Still running:
+                keep the visual progress below 100, but immediately reflect
+                the server stage and use a much shorter adaptive check delay.
                 */
+
+                if (
+                    Number.isFinite(
+                        backendProgress
+                    ) &&
+                    backendProgress > 0 &&
+                    backendProgress < 100
+                ) {
+
+                    localProgressValue =
+                        Math.max(
+                            localProgressValue,
+                            Math.min(
+                                97,
+                                backendProgress
+                            )
+                        );
+
+                }
+
+
+                updateProgress(
+                    Math.min(
+                        97,
+                        Math.max(
+                            localProgressValue,
+                            10
+                        )
+                    ),
+                    "Scraping in progress",
+                    serverStage,
+                    found,
+                    total
+                );
+
 
                 checkAttempt += 1;
 
@@ -4977,20 +5145,34 @@
                 );
 
 
+                consecutiveCheckErrors += 1;
                 checkAttempt += 1;
 
 
                 /*
-                Network errors also back off instead of retrying fast.
+                Retry network/check failures without hammering n8n.
+                First failure retries in 60s, then backs off.
                 */
 
+                const retryDelay =
+                    Math.min(
+                        240000,
+                        Math.max(
+                            60000,
+                            getNextCheckDelay()
+                        )
+                    );
+
+
                 scheduleNextJobCheck(
-                    Math.max(
-                        120000,
-                        getNextCheckDelay()
-                    ),
+                    retryDelay,
                     totalQuantity
                 );
+
+            }
+            finally {
+
+                checkInFlight = false;
 
             }
 
