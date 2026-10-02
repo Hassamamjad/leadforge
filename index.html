@@ -2340,6 +2340,14 @@
         let checkInFlight = false;
         let consecutiveCheckErrors = 0;
 
+        // Polling window is tied to the real Gosom/n8n runtime budget,
+        // not to a fixed number of checks.
+        let pollingStartedAt = 0;
+        let pollingDeadlineAt = 0;
+        let lastJobCheckAt = 0;
+        let lastVisibilityCheckAt = 0;
+        let currentEmailRequested = true;
+
         let localProgressTimer = null;
         let localProgressValue = 0;
 
@@ -4324,9 +4332,15 @@
 
 
                 /*
-                No active-job resume marker is stored.
-                A scrape can only begin from an explicit Generate Leads click.
+                Keep only the current browser-session job ID.
+                This lets a page refresh recover the final result without
+                reviving old jobs from previous browser sessions.
                 */
+
+                sessionStorage.setItem(
+                    "leadforge_active_job_id",
+                    currentJobId
+                );
 
 
                 const now =
@@ -4388,14 +4402,27 @@
                 );
 
 
+                const jobStartedAtMs =
+                    Date.parse(now) ||
+                    Date.now();
+
+                const emailRequested =
+                    Array.isArray(data.fields) &&
+                    data.fields.includes("email");
+
+
                 startLocalProgress(
-                    data.quantity
+                    data.quantity,
+                    jobStartedAtMs,
+                    10
                 );
 
 
                 startPolling(
                     data.quantity,
-                    data.verify_emails
+                    emailRequested,
+                    jobStartedAtMs,
+                    false
                 );
 
             }
@@ -4427,67 +4454,155 @@
         ==============================================================
         */
 
-        function getFirstCheckDelay(
+        function getBackendRuntimeBudgetMs(
             quantity,
-            verifyEmails
+            emailRequested
         ) {
 
-            const q = Number(quantity || 100);
-            let delay;
+            const q =
+                Math.max(
+                    1,
+                    Number(quantity || 100)
+                );
+
+            /*
+            Mirror the Gosom max_time formula used by n8n, then add
+            a small workflow/save buffer.
+
+            For 500 leads with email selected:
+            Gosom max_time = 15 minutes.
+            Frontend deadline = 22 minutes.
+
+            The important part: polling can no longer stop at 10.5 minutes
+            while the backend is still legitimately working.
+            */
+
+            const configuredMaxSeconds =
+                emailRequested
+                    ? Math.min(
+                        3600,
+                        Math.max(
+                            900,
+                            600 +
+                            Math.ceil(q / 500) * 300
+                        )
+                    )
+                    : Math.min(
+                        2400,
+                        Math.max(
+                            600,
+                            300 +
+                            Math.ceil(q / 500) * 180
+                        )
+                    );
+
+            return (
+                configuredMaxSeconds +
+                420
+            ) * 1000;
+
+        }
+
+
+        function getFirstCheckDelay(
+            quantity
+        ) {
+
+            const q =
+                Number(quantity || 100);
+
+            /*
+            One early check catches fast jobs.
+            Larger jobs wait longer before spending the first n8n
+            status-check execution.
+            */
 
             if (q <= 500) {
-                delay = 120000;
-            }
-            else if (q <= 1000) {
-                delay = 150000;
-            }
-            else if (q <= 2500) {
-                delay = 210000;
-            }
-            else {
-                delay = 300000;
+                return 180000; // 3 min
             }
 
-            if (verifyEmails) {
-                delay += 30000;
+            if (q <= 1000) {
+                return 240000; // 4 min
             }
 
-            return delay;
+            if (q <= 2500) {
+                return 300000; // 5 min
+            }
+
+            return 420000; // 7 min
+
         }
 
 
         function getNextCheckDelay() {
 
-            const delays = [
-                60000,
-                60000,
-                90000,
-                120000,
-                180000
-            ];
+            const elapsed =
+                Date.now() -
+                pollingStartedAt;
 
-            return delays[
-                Math.min(
-                    Math.max(checkAttempt - 1, 0),
-                    delays.length - 1
-                )
-            ];
+            /*
+            Sparse early checks, tighter checks near the usual
+            Gosom completion window, then back off again.
+
+            A ~11 minute job normally needs about 4-5 n8n check
+            executions instead of 20+.
+            */
+
+            if (elapsed < 8 * 60 * 1000) {
+                return 300000; // next around 8 min
+            }
+
+            if (elapsed < 14 * 60 * 1000) {
+                return 90000; // 90 sec around likely completion
+            }
+
+            if (elapsed < 22 * 60 * 1000) {
+                return 120000; // 2 min
+            }
+
+            return 180000; // 3 min
+
         }
 
 
         function startPolling(
             totalQuantity,
-            verifyEmails
+            emailRequested,
+            startedAtMs,
+            immediate
         ) {
 
             checkAttempt = 0;
             checkInFlight = false;
             consecutiveCheckErrors = 0;
 
+            currentEmailRequested =
+                emailRequested !== false;
+
+            pollingStartedAt =
+                Number(startedAtMs) ||
+                Date.now();
+
+            pollingDeadlineAt =
+                pollingStartedAt +
+                getBackendRuntimeBudgetMs(
+                    totalQuantity,
+                    currentEmailRequested
+                );
+
+            if (immediate) {
+
+                fetchJobCheck(
+                    totalQuantity
+                );
+
+                return;
+
+            }
+
             scheduleNextJobCheck(
                 getFirstCheckDelay(
-                    totalQuantity,
-                    verifyEmails
+                    totalQuantity
                 ),
                 totalQuantity
             );
@@ -4500,6 +4615,10 @@
             totalQuantity
         ) {
 
+            if (!currentJobId) {
+                return;
+            }
+
             if (checkTimer) {
 
                 clearTimeout(
@@ -4507,6 +4626,33 @@
                 );
 
             }
+
+
+            const remaining =
+                pollingDeadlineAt
+                    ? (
+                        pollingDeadlineAt -
+                        Date.now()
+                    )
+                    : delay;
+
+
+            /*
+            Never schedule far beyond the backend deadline.
+            If the deadline is close, perform the final check then.
+            */
+
+            const safeDelay =
+                Math.max(
+                    1000,
+                    Math.min(
+                        Number(delay || 60000),
+                        Math.max(
+                            1000,
+                            remaining
+                        )
+                    )
+                );
 
 
             checkTimer =
@@ -4518,15 +4664,100 @@
                         );
 
                     },
-                    delay
+                    safeDelay
                 );
 
         }
 
 
-        // Switching browser tabs does not trigger a Job Check.
-        // Only the scheduled timer below may call n8n.
+        /*
+        When the user returns from the n8n/Railway tab near the expected
+        completion window, do ONE throttled immediate check.
 
+        This fixes the case where n8n already says "Succeeded" but the
+        browser is still waiting for its next scheduled timer.
+
+        It is intentionally throttled:
+        - only after 8 minutes of runtime
+        - at least 10 seconds since any job check
+        - at most once every 3 minutes from tab visibility
+        */
+
+        document.addEventListener(
+            "visibilitychange",
+            function () {
+
+                if (
+                    document.hidden ||
+                    !currentJobId ||
+                    isDemoMode ||
+                    checkInFlight ||
+                    !pollingStartedAt
+                ) {
+                    return;
+                }
+
+
+                const now =
+                    Date.now();
+
+                const elapsed =
+                    now -
+                    pollingStartedAt;
+
+
+                if (
+                    elapsed <
+                    8 * 60 * 1000
+                ) {
+                    return;
+                }
+
+
+                if (
+                    now -
+                    lastJobCheckAt <
+                    10000
+                ) {
+                    return;
+                }
+
+
+                if (
+                    now -
+                    lastVisibilityCheckAt <
+                    180000
+                ) {
+                    return;
+                }
+
+
+                lastVisibilityCheckAt =
+                    now;
+
+
+                if (checkTimer) {
+
+                    clearTimeout(
+                        checkTimer
+                    );
+
+                    checkTimer = null;
+
+                }
+
+
+                fetchJobCheck(
+                    currentRequestedQuantity ||
+                    Number(
+                        currentJobMeta?.total_requested ||
+                        0
+                    ) ||
+                    100
+                );
+
+            }
+        );
 
 
         function stopPolling() {
@@ -4544,6 +4775,8 @@
 
             stopLocalProgress();
 
+            checkInFlight = false;
+
         }
 
 
@@ -4558,15 +4791,22 @@
         */
 
         function startLocalProgress(
-            totalQuantity
+            totalQuantity,
+            startedAtMs,
+            initialProgress
         ) {
 
             stopLocalProgress();
 
             const startedAt =
+                Number(startedAtMs) ||
                 Date.now();
 
-            localProgressValue = 8;
+            localProgressValue =
+                Math.max(
+                    8,
+                    Number(initialProgress || 0)
+                );
 
 
             localProgressTimer =
@@ -4711,7 +4951,7 @@
             if (document.hidden) {
 
                 scheduleNextJobCheck(
-                    90000,
+                    60000,
                     totalQuantity
                 );
 
@@ -4721,6 +4961,8 @@
 
 
             checkInFlight = true;
+            lastJobCheckAt =
+                Date.now();
 
 
             try {
@@ -5078,15 +5320,74 @@
 
                 checkAttempt += 1;
 
-                if (checkAttempt >= 6) {
+
+                /*
+                Do NOT stop because a fixed check count was reached.
+                The backend is allowed to run until its real runtime
+                budget/deadline.
+
+                The previous fixed "6 checks" cutoff was the exact reason
+                an 11-minute successful workflow could leave the UI at 97%:
+                polling stopped around 10.5 minutes.
+                */
+
+                if (
+                    pollingDeadlineAt &&
+                    Date.now() >=
+                    pollingDeadlineAt
+                ) {
+
+                    const timedOutJobId =
+                        currentJobId;
+
                     stopPolling();
+
                     showError(
-                        "The job did not publish a final status. Polling has been stopped to prevent extra n8n executions. Please retry the scrape once."
+                        "The scraper exceeded its maximum runtime. Final status checking has stopped."
                     );
+
+                    sessionStorage.removeItem(
+                        "leadforge_active_job_id"
+                    );
+
                     resetGenerateButton();
+
+                    try {
+
+                        await mergeLocalJob(
+                            timedOutJobId,
+                            {
+                                status:
+                                    "failed",
+
+                                current_stage:
+                                    "Timed out",
+
+                                error_message:
+                                    "The scraper exceeded its maximum runtime.",
+
+                                job_updated_at:
+                                    new Date().toISOString()
+                            }
+                        );
+
+                    }
+                    catch (historyError) {
+
+                        console.log(
+                            "Timeout history save error:",
+                            historyError
+                        );
+
+                    }
+
                     currentJobId = null;
+
+                    loadHistory(false);
+
                     return;
                 }
+
 
                 scheduleNextJobCheck(
                     getNextCheckDelay(),
@@ -5105,10 +5406,20 @@
                 consecutiveCheckErrors += 1;
                 checkAttempt += 1;
 
-                if (consecutiveCheckErrors >= 3 || checkAttempt >= 6) {
+                if (
+                    consecutiveCheckErrors >= 3 ||
+                    (
+                        pollingDeadlineAt &&
+                        Date.now() >=
+                        pollingDeadlineAt
+                    )
+                ) {
                     stopPolling();
                     showError(
-                        "The final job status could not be read from n8n. Polling has been stopped to prevent repeated executions."
+                        "The final job status could not be read from n8n. Status checking has been stopped."
+                    );
+                    sessionStorage.removeItem(
+                        "leadforge_active_job_id"
                     );
                     resetGenerateButton();
                     currentJobId = null;
@@ -6357,17 +6668,248 @@
         ==============================================================
         */
 
-        function resumeLatestRunningJob() {
+        async function resumeLatestRunningJob() {
 
             /*
-            Auto resume is intentionally disabled.
-            Only startLeadJob(), called by the Generate Leads button, may
-            start/schedule backend job checks.
+            Prefer the current session marker. For users upgrading from the
+            previous frontend (which did not store the marker), fall back to
+            the newest local running job only when it is recent.
+
+            Exactly ONE immediate check is made on resume. If the job is still
+            running, normal low-frequency polling continues.
             */
-            sessionStorage.removeItem(
-                "leadforge_active_job_id"
-            );
-            return;
+
+            let jobId =
+                sessionStorage.getItem(
+                    "leadforge_active_job_id"
+                );
+
+
+            let job = null;
+
+
+            try {
+
+                if (jobId) {
+
+                    job =
+                        await getLocalJob(
+                            jobId
+                        );
+
+                }
+
+
+                if (!job) {
+
+                    const jobs =
+                        await getAllLocalJobs();
+
+                    const now =
+                        Date.now();
+
+
+                    const candidates =
+                        jobs
+                            .filter(
+                                function (item) {
+
+                                    const status =
+                                        String(
+                                            item.status ||
+                                            ""
+                                        )
+                                            .toLowerCase();
+
+                                    const createdAt =
+                                        Date.parse(
+                                            item.job_created_at ||
+                                            item.job_updated_at ||
+                                            ""
+                                        );
+
+                                    const age =
+                                        Number.isFinite(
+                                            createdAt
+                                        )
+                                            ? (
+                                                now -
+                                                createdAt
+                                            )
+                                            : Infinity;
+
+
+                                    return (
+                                        (
+                                            status === "running" ||
+                                            status === "queued" ||
+                                            status === "processing"
+                                        ) &&
+                                        age >= 0 &&
+                                        age <=
+                                        45 * 60 * 1000
+                                    );
+
+                                }
+                            )
+                            .sort(
+                                function (a, b) {
+
+                                    return (
+                                        Date.parse(
+                                            b.job_created_at ||
+                                            b.job_updated_at ||
+                                            0
+                                        ) -
+                                        Date.parse(
+                                            a.job_created_at ||
+                                            a.job_updated_at ||
+                                            0
+                                        )
+                                    );
+
+                                }
+                            );
+
+
+                    if (candidates.length) {
+
+                        job =
+                            candidates[0];
+
+                        jobId =
+                            job.job_id;
+
+                    }
+
+                }
+
+
+                if (
+                    !job ||
+                    !jobId
+                ) {
+                    return;
+                }
+
+
+                currentJobId =
+                    jobId;
+
+                currentJobMeta =
+                    job;
+
+                currentRequestedQuantity =
+                    Number(
+                        job.total_requested ||
+                        job.quantity ||
+                        100
+                    );
+
+
+                sessionStorage.setItem(
+                    "leadforge_active_job_id",
+                    currentJobId
+                );
+
+
+                const startedAtMs =
+                    Date.parse(
+                        job.job_created_at ||
+                        job.job_updated_at ||
+                        ""
+                    ) ||
+                    Date.now();
+
+
+                const emailRequested =
+                    Array.isArray(
+                        job.fields
+                    )
+                        ? job.fields.includes(
+                            "email"
+                        )
+                        : String(
+                            job.fields ||
+                            ""
+                        )
+                            .toLowerCase()
+                            .includes(
+                                "email"
+                            );
+
+
+                document.getElementById(
+                    "progressCard"
+                ).classList.add(
+                    "show"
+                );
+
+                document.getElementById(
+                    "resultsCard"
+                ).classList.add(
+                    "show"
+                );
+
+                document.getElementById(
+                    "generateBtn"
+                ).disabled =
+                    true;
+
+                document.getElementById(
+                    "generateBtn"
+                ).innerHTML =
+                    "<span>Job Running...</span>";
+
+
+                localProgressValue =
+                    Math.max(
+                        10,
+                        Number(
+                            job.progress ||
+                            0
+                        )
+                    );
+
+
+                updateProgress(
+                    Math.min(
+                        97,
+                        localProgressValue
+                    ),
+                    "Checking job status...",
+                    "Reconnecting to the active scrape...",
+                    Number(
+                        job.total_found ||
+                        0
+                    ),
+                    currentRequestedQuantity
+                );
+
+
+                startLocalProgress(
+                    currentRequestedQuantity,
+                    startedAtMs,
+                    localProgressValue
+                );
+
+
+                startPolling(
+                    currentRequestedQuantity,
+                    emailRequested,
+                    startedAtMs,
+                    true
+                );
+
+            }
+            catch (error) {
+
+                console.log(
+                    "Resume job error:",
+                    error
+                );
+
+            }
 
         }
 
@@ -6887,21 +7429,19 @@
         ==============================================================
         */
 
-        /*
-        IMPORTANT: never auto-resume a previous job on login/page load.
-        Old versions stored this marker in sessionStorage; clear it so a
-        stale browser session can never trigger the Job Check webhook.
-        */
-        sessionStorage.removeItem(
-            "leadforge_active_job_id"
-        );
-
         initLocationSelectors();
 
         updateCredits();
 
-        /* Local IndexedDB only. This does not call n8n. */
+        /* Local IndexedDB only. */
         loadHistory(false);
+
+        /*
+        Recover only the current/recent active scrape and immediately read
+        its final status once. This also lets users upgrading from v2 recover
+        a job that already finished in n8n while the old UI stayed at 97%.
+        */
+        resumeLatestRunningJob();
 
     </script>
 
